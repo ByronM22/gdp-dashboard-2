@@ -1,151 +1,170 @@
 import streamlit as st
+import numpy as np
 import pandas as pd
-import math
-from pathlib import Path
+import numpy_financial as npf
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Título de la aplicación
+st.title("Análisis de Flujos de Caja con Valor de Rescate y Crecimiento Variable")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Entrada de datos
+n_años = st.number_input("Número de años del proyecto:", min_value=1, value=5, step=1)
+inversion_inicial = st.number_input("Inversión inicial:", value=65000.00)
+tasa_descuento = st.number_input("Tasa de descuento (%):", value=20.0) / 100
+valor_rescate = st.number_input("Valor de rescate al final del proyecto:", value=15000.0)
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# Entrada del crecimiento porcentual por separado
+crecimiento_ingresos = st.number_input("Crecimiento anual de ingresos (%):", value=5.0) / 100
+crecimiento_costo_variable = st.number_input("Crecimiento anual de costo variable (%):", value=5.0) / 100
+crecimiento_gastos_fijos = st.number_input("Crecimiento anual de gastos fijos (%):", value=5.0) / 100
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+# Crear contenedores para flujos de caja y gastos
+ingresos = []
+costos_variables = []
+gastos_fijos = []
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+st.subheader("Ingresar los flujos de caja")
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+# Ingresar ingresos, costos variables y gastos fijos para cada año
+ingreso_base = st.number_input("Ingresos para el primer año:", value=100000.00)
+costo_variable_base = st.number_input("Porcentaje de costo variable para el primer año (%):", value=40.0) / 100
+gasto_fijo_base = st.number_input("Gastos fijos para el primer año:", value=20000.00)
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+for i in range(n_años):
+    # Aplicar el crecimiento a ingresos, costos variables y gastos fijos
+    ingreso_anual = ingreso_base * ((1 + crecimiento_ingresos) ** i)
+    ingresos.append(ingreso_anual)
+    
+    # Cálculo del costo de ventas con crecimiento
+    costo_variable_anual = costo_variable_base * ((1 + crecimiento_costo_variable) ** i)
+    costos_variables.append(costo_variable_anual)
+    
+    # Cálculo del gasto fijo con crecimiento
+    gasto_fijo_anual = gasto_fijo_base * ((1 + crecimiento_gastos_fijos) ** i)
+    gastos_fijos.append(gasto_fijo_anual)
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+# Sumar el valor de rescate al último año en los ingresos
+ingresos[-1] += valor_rescate
 
-    return gdp_df
+# Calcular el costo de ventas y utilidad neta
+costos_de_ventas = [ingreso * cv for ingreso, cv in zip(ingresos, costos_variables)]
+total_egresos = [cv + gf for cv, gf in zip(costos_de_ventas, gastos_fijos)]
+utilidad_neta = [ingreso - egreso for ingreso, egreso in zip(ingresos, total_egresos)]
 
-gdp_df = get_gdp_data()
+# Añadir la inversión inicial como una pérdida en el año 0
+utilidad_neta.insert(0, -inversion_inicial)
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+# Calcular el Valor Actual (VA)
+valores_actuales = [utilidad_neta[0]]
+for i in range(1, n_años + 1):
+    valor_actual = npf.pv(rate=tasa_descuento, nper=i, pmt=0, fv=utilidad_neta[i])
+    valores_actuales.append(abs(valor_actual))
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+# Inicializar correctamente la lista de "Recuperación" (valores acumulados)
+valores_acumulados = [valores_actuales[0]]
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+# Cálculo de la recuperación para cada año
+for i in range(1, len(valores_actuales)):
+    valores_acumulados.append(valores_acumulados[i - 1] + valores_actuales[i])
 
-# Add some spacing
-''
-''
+# Crear DataFrame para la tabla de resultados
+tabla = pd.DataFrame({
+    "Año": [f"Año {i}" for i in range(n_años + 1)],
+    "Ingresos": [0] + ingresos,
+    "Costo Variable (%)": [0] + [cv * 100 for cv in costos_variables],
+    "Costo de Ventas": [0] + costos_de_ventas,
+    "Gastos Fijos": [0] + gastos_fijos,
+    "Total Egresos": [inversion_inicial] + total_egresos,
+    "Utilidad Neta": utilidad_neta,
+    "Valor Actual (VA)": valores_actuales,
+    "Recuperación": valores_acumulados
+})
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+# Mostrar tabla de resultados
+st.subheader("Tabla de Flujos de Caja (Escenario Original)")
+st.dataframe(tabla)
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+# Calcular VAN, TIR y VAE
+van = npf.npv(tasa_descuento, utilidad_neta)
+tir = npf.irr(utilidad_neta)
+vae = van * tasa_descuento / (1 - (1 + tasa_descuento) ** -n_años)
 
-countries = gdp_df['Country Code'].unique()
+# Mostrar VAN, TIR, VAE y Payback
+st.subheader("Resultados Escenario Original")
+st.write(f"**Valor Actual Neto (VAN):** ${van:,.2f}")
+st.write(f"**Tasa Interna de Retorno (TIR):** {tir * 100:.2f}%")
+st.write(f"**Valor Anual Equivalente (VAE):** ${vae:,.2f}")
 
-if not len(countries):
-    st.warning("Select at least one country")
+# Cálculo del periodo de recuperación (Payback)
+payback = None
+for i, acumulado in enumerate(valores_acumulados):
+    if acumulado >= 0:
+        payback = i
+        break
 
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
+if payback is not None:
+    meses = abs((valores_acumulados[payback - 1] * 12) / (valores_acumulados[payback] - valores_acumulados[payback - 1]))
+    st.write(f"**Periodo de recuperación (Payback):** {abs(payback - 1)} años, {int(abs(meses))} meses, {int(abs((meses % 1) * 30))} días")
+else:
+    st.write("**Periodo de recuperación (Payback):** No se recupera la inversión")
 
-''
-''
-''
+# Calcular VAN de ingresos y egresos por separado
+van_ingresos = npf.npv(tasa_descuento, [0] + ingresos)
+van_egresos = npf.npv(tasa_descuento, [inversion_inicial] + total_egresos)
+st.write(f"**VAN Ingresos:** ${van_ingresos:,.2f}")
+st.write(f"**VAN Egresos:** ${van_egresos:,.2f}")
 
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
+# Calcular la razón VAN ingresos/egresos
+razon_van = van_ingresos / van_egresos
+st.write(f"**Razón VAN Ingresos/VAN Egresos:** {razon_van:.2f}")
 
-st.header('GDP over time', divider='gray')
+# Escenario pesimista: Agregar opción de ajuste
+st.subheader("Escenario Pesimista")
+ajuste_opcion = st.selectbox("Seleccione qué variable desea ajustar:", ["Ingresos", "Costo Variable", "Gastos Fijos"])
 
-''
+van_objetivo = st.number_input("VAN objetivo (0 para VAN igual a cero):", value=0.0)
+nuevo_ingreso_base = ingreso_base
+nuevo_costo_variable_base = costo_variable_base
+nuevo_gasto_fijo_base = gasto_fijo_base
+tolerancia = 0.01
+diferencia_van = np.inf
 
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
+while abs(diferencia_van) > tolerancia:
+    if ajuste_opcion == "Ingresos":
+        ingresos_pesimistas = [nuevo_ingreso_base * ((1 + crecimiento_ingresos) ** i) for i in range(n_años)]
+        ingresos_pesimistas[-1] += valor_rescate
+    else:
+        ingresos_pesimistas = [ingreso_base * ((1 + crecimiento_ingresos) ** i) for i in range(n_años)]
+        ingresos_pesimistas[-1] += valor_rescate
 
-''
-''
+    if ajuste_opcion == "Costo Variable":
+        costos_variables_pesimista = [nuevo_costo_variable_base * ((1 + crecimiento_costo_variable) ** i) for i in range(n_años)]
+    else:
+        costos_variables_pesimista = [costo_variable_base * ((1 + crecimiento_costo_variable) ** i) for i in range(n_años)]
 
+    if ajuste_opcion == "Gastos Fijos":
+        gastos_fijos_pesimista = [nuevo_gasto_fijo_base * ((1 + crecimiento_gastos_fijos) ** i) for i in range(n_años)]
+    else:
+        gastos_fijos_pesimista = [gasto_fijo_base * ((1 + crecimiento_gastos_fijos) ** i) for i in range(n_años)]
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+    costos_de_ventas_pesimista = [ingreso * cv for ingreso, cv in zip(ingresos_pesimistas, costos_variables_pesimista)]
+    total_egresos_pesimista = [cv + gf for cv, gf in zip(costos_de_ventas_pesimista, gastos_fijos_pesimista)]
+    utilidad_neta_pesimista = [ingreso - egreso for ingreso, egreso in zip(ingresos_pesimistas, total_egresos_pesimista)]
+    utilidad_neta_pesimista.insert(0, -inversion_inicial)
+    van_pesimista = npf.npv(tasa_descuento, utilidad_neta_pesimista)
+    diferencia_van = van_pesimista - van_objetivo
 
-st.header(f'GDP in {to_year}', divider='gray')
+    # Ajustar la variable seleccionada
+    if ajuste_opcion == "Ingresos":
+        nuevo_ingreso_base -= diferencia_van / 100
+    elif ajuste_opcion == "Costo Variable":
+        nuevo_costo_variable_base += diferencia_van / 10000
+    elif ajuste_opcion == "Gastos Fijos":
+        nuevo_gasto_fijo_base += diferencia_van / 100
 
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+# Mostrar resultados del ajuste
+if ajuste_opcion == "Ingresos":
+    st.write(f"Para que el VAN sea igual a ${van_objetivo:,.2f},  los ingresos en el año 1 deberían ser de ${nuevo_ingreso_base:,.2f}.")
+elif ajuste_opcion == "Costo Variable":
+    st.write(f"Para que el VAN sea igual a ${van_objetivo:,.2f}, el costo variable en el año 1 debería ser de {nuevo_costo_variable_base * 100:.2f}%.")
+elif ajuste_opcion == "Gastos Fijos":
+    st.write(f"Para que el VAN sea igual a ${van_objetivo:,.2f}, los gastos fijos en el año 1 deberían ser de ${nuevo_gasto_fijo_base:,.2f}.")
